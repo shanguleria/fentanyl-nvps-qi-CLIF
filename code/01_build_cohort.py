@@ -17,6 +17,7 @@ import sys
 import warnings
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -30,8 +31,10 @@ from utils import (
     load_config,
     save_intermediate,
     save_table,
+    save_figure,
     FENTANYL_EXCLUDE_NAMES,
     CONCURRENT_SEDATIVES,
+    PARALYTIC_CATEGORIES,
     MV_GAP_THRESHOLD_HOURS,
     MV_MIN_DURATION_HOURS,
 )
@@ -190,6 +193,57 @@ def filter_fentanyl_during_mv(episodes):
     print(f"    {episodes_fent['fentanyl_type'].value_counts().to_string()}")
 
     return episodes_fent
+
+
+# ──────────────────────────────────────────────
+# Step 3b: Exclude patients on continuous paralytics
+# ──────────────────────────────────────────────
+def exclude_continuous_paralytics(episodes):
+    """Exclude patients who received continuous paralytic infusions during MV.
+
+    Intermittent/bolus paralytics (e.g., for intubation) are allowed.
+    Only continuous infusions (rocuronium, vecuronium, cisatracurium) trigger exclusion.
+    """
+    print("Step 3b: Excluding patients on continuous paralytic infusions...")
+
+    # Load continuous paralytics
+    paralytic_dfs = []
+    for cat in PARALYTIC_CATEGORIES:
+        df = load_clif_table(
+            "medication_admin_continuous",
+            columns=["hospitalization_id", "admin_dttm", "med_category"],
+            filters=[("med_category", "==", cat)],
+        )
+        if len(df) > 0:
+            paralytic_dfs.append(df)
+
+    if not paralytic_dfs:
+        print("  No continuous paralytic records found. No exclusions.")
+        return episodes
+
+    para = pd.concat(paralytic_dfs, ignore_index=True)
+    para["admin_dttm"] = pd.to_datetime(para["admin_dttm"])
+
+    # Check overlap with MV windows
+    para = para.merge(
+        episodes[["hospitalization_id", "mv_start", "mv_end"]],
+        on="hospitalization_id",
+    )
+    para = para[
+        (para["admin_dttm"] >= para["mv_start"])
+        & (para["admin_dttm"] <= para["mv_end"])
+    ]
+
+    exclude_ids = set(para["hospitalization_id"].unique())
+    n_before = len(episodes)
+    episodes = episodes[~episodes["hospitalization_id"].isin(exclude_ids)].copy()
+    n_excluded = n_before - len(episodes)
+
+    print(f"  Patients with continuous paralytics during MV: {len(exclude_ids):,}")
+    print(f"  Excluded: {n_excluded:,}")
+    print(f"  Remaining: {len(episodes):,}")
+
+    return episodes
 
 
 # ──────────────────────────────────────────────
@@ -397,12 +451,98 @@ def create_table1(cohort):
 # Step 9: Cohort flow diagram
 # ──────────────────────────────────────────────
 def save_cohort_flow(flow_steps):
-    """Save the cohort exclusion flow as a table."""
+    """Save the cohort exclusion flow as a table and CONSORT figure."""
     flow_df = pd.DataFrame(flow_steps, columns=["Step", "N"])
     save_table(flow_df, "cohort_flow")
     print("\n  Cohort flow:")
     for _, row in flow_df.iterrows():
         print(f"    {row['Step']}: {row['N']:,}")
+
+    # Generate CONSORT diagram
+    plot_consort(flow_steps)
+
+
+def plot_consort(flow_steps):
+    """Create a CONSORT-style flow diagram."""
+    from matplotlib.patches import FancyBboxPatch
+
+    print("\n  Generating CONSORT diagram...")
+    n_steps = len(flow_steps)
+
+    # Layout constants
+    box_w = 3.2       # half-width of main boxes
+    box_h = 0.45      # half-height of main boxes
+    excl_w = 1.8      # half-width of exclusion boxes
+    excl_h = 0.35     # half-height of exclusion boxes
+    step_gap = 1.6    # vertical distance between box centers
+    center_x = 4.0    # x-center of main column
+    excl_x = 8.5      # x-center of exclusion column
+
+    total_h = step_gap * (n_steps - 1) + 2 * box_h
+    fig, ax = plt.subplots(figsize=(12, max(total_h + 1.5, 6)))
+    ax.set_xlim(0, 11)
+    ax.set_ylim(-box_h - 0.3, total_h + box_h + 0.8)
+    ax.axis("off")
+    ax.set_aspect("equal")
+
+    # Compute y positions top-down (highest y = first step)
+    ys = [step_gap * (n_steps - 1 - i) for i in range(n_steps)]
+
+    # Colors
+    blue_face, blue_edge = "#e3f2fd", "#1565c0"
+    red_face, red_edge = "#fce4ec", "#c62828"
+    green_face, green_edge = "#e8f5e9", "#2e7d32"
+
+    def draw_box(cx, cy, hw, hh, text, facecolor, edgecolor, lw=1.5, fontsize=10, fontweight="bold"):
+        rect = FancyBboxPatch(
+            (cx - hw, cy - hh), 2 * hw, 2 * hh,
+            boxstyle="round,pad=0.1", facecolor=facecolor,
+            edgecolor=edgecolor, linewidth=lw,
+        )
+        ax.add_patch(rect)
+        ax.text(cx, cy, text, ha="center", va="center",
+                fontsize=fontsize, fontweight=fontweight, color="black")
+
+    for i, (label, n) in enumerate(flow_steps):
+        y = ys[i]
+        is_last = i == n_steps - 1
+
+        # Main box
+        fc = green_face if is_last else blue_face
+        ec = green_edge if is_last else blue_edge
+        lw = 2.0 if is_last else 1.5
+        draw_box(center_x, y, box_w, box_h,
+                 f"{label}\n(n = {n:,})", fc, ec, lw=lw, fontsize=10)
+
+        # Arrow down to next main box
+        if not is_last:
+            next_y = ys[i + 1]
+            ax.annotate(
+                "", xy=(center_x, next_y + box_h),
+                xytext=(center_x, y - box_h),
+                arrowprops=dict(arrowstyle="-|>", color=blue_edge, lw=1.5),
+            )
+
+        # Exclusion box: midpoint between this box and the one above
+        if i > 0:
+            prev_n = flow_steps[i - 1][1]
+            excluded = prev_n - n
+            if excluded > 0:
+                mid_y = (ys[i - 1] + ys[i]) / 2  # midpoint between prev and current
+                draw_box(excl_x, mid_y, excl_w, excl_h,
+                         f"Excluded\n(n = {excluded:,})",
+                         red_face, red_edge, lw=1.2, fontsize=9, fontweight="normal")
+                # Horizontal arrow from main column to exclusion box
+                ax.annotate(
+                    "", xy=(excl_x - excl_w, mid_y),
+                    xytext=(center_x + box_w, mid_y),
+                    arrowprops=dict(arrowstyle="-|>", color=red_edge, lw=1.2),
+                )
+
+    ax.set_title("CONSORT Flow Diagram", fontsize=14, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    save_figure(fig, "fig0_consort_diagram")
+    plt.close(fig)
 
 
 # ──────────────────────────────────────────────
@@ -427,6 +567,10 @@ def main():
     # Step 3: Fentanyl filter
     episodes = filter_fentanyl_during_mv(episodes)
     flow.append(("Received fentanyl during MV", len(episodes)))
+
+    # Step 3b: Exclude continuous paralytics
+    episodes = exclude_continuous_paralytics(episodes)
+    flow.append(("No continuous paralytic infusions", len(episodes)))
 
     # Step 4: Demographics
     cohort = merge_demographics(episodes)

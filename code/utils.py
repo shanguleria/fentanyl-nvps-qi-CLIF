@@ -85,6 +85,9 @@ FENTANYL_EXCLUDE_NAMES = [
 # Concurrent sedatives to track
 CONCURRENT_SEDATIVES = ["propofol", "dexmedetomidine", "midazolam"]
 
+# Continuous paralytic med_categories to exclude from cohort
+PARALYTIC_CATEGORIES = ["rocuronium", "vecuronium", "cisatracurium"]
+
 # MV episode gap threshold (hours) — consecutive IMV rows within this gap
 # are considered part of the same episode
 MV_GAP_THRESHOLD_HOURS = 24

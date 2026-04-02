@@ -274,7 +274,7 @@ def create_summary(increases):
 
     ax.set_xlabel("% of Fentanyl Dose Increases")
     ax.set_title(
-        f"NVPS Justification for Fentanyl Dose Increases\n"
+        f"NVPS Score at Time of Fentanyl Dose Increase\n"
         f"({LOOKBACK_MINUTES}-min lookback, protocol threshold: NVPS > {NVPS_THRESHOLD})"
     )
     ax.set_xlim(0, max(pcts) * 1.3)
@@ -398,7 +398,7 @@ def stratify_by_icu_type(increases):
         ax.set_yticks(y_pos)
         ax.set_yticklabels(icu_df["icu_type"].tolist())
         ax.set_xlabel("% of Dose Increases")
-        ax.set_title("Fentanyl Dose Increase Justification by ICU Type")
+        ax.set_title("NVPS Score at Time of Fentanyl Dose Increase by ICU Type")
         ax.legend(loc="lower right", fontsize=8)
         ax.set_xlim(0, 105)
 

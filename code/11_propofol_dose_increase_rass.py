@@ -1,11 +1,9 @@
 """
-09_dose_increase_rass.py
-========================
-QI Analysis: Are fentanyl dose increases driven by RASS (sedation depth)
-rather than NVPS (pain)?
+11_propofol_dose_increase_rass.py
+=================================
+QI Analysis: Are propofol dose increases driven by RASS (sedation depth)?
 
-Hypothesis: Nurses may be titrating fentanyl to RASS instead of NVPS.
-For each fentanyl rate increase (continuous infusion), we look back
+For each propofol rate increase (continuous infusion), we look back
 60 minutes for the most recent RASS score and categorize:
   - RASS > 0:   agitated — dose increase justified for sedation
   - RASS -1, 0: light sedation — near target
@@ -16,10 +14,11 @@ For each fentanyl rate increase (continuous infusion), we look back
 Requires: 01_build_cohort.py outputs
 
 Outputs:
-  - tables/table15_dose_increase_rass_justification.csv
-  - tables/table16_dose_increase_rass_by_icu.csv
-  - figures/fig20_dose_increase_rass_justification.pdf/.png
-  - figures/fig21_dose_increase_rass_by_icu.pdf/.png
+  - tables/table18_propofol_dose_increase_rass.csv
+  - tables/table19_propofol_dose_increase_rass_by_icu.csv
+  - figures/fig26_propofol_dose_increase_rass.pdf/.png
+  - figures/fig27_propofol_dose_increase_rass_by_icu.pdf/.png
+  - figures/fig28_propofol_rass_justification_by_year.pdf/.png
 """
 import sys
 import warnings
@@ -36,7 +35,6 @@ from utils import (
     load_intermediate,
     save_table,
     save_figure,
-    FENTANYL_EXCLUDE_NAMES,
 )
 
 warnings.filterwarnings("ignore")
@@ -44,105 +42,68 @@ sns.set_theme(style="whitegrid", font_scale=1.1)
 
 LOOKBACK_MINUTES = 60
 RASS_JUSTIFIED_THRESHOLD = 0  # dose increase justified when RASS > this value
+PROPOFOL_MAX_DOSE = 200  # mcg/kg/min — outlier threshold
 
 
 # ──────────────────────────────────────────────
-# Step 1: Load and standardize fentanyl continuous data
+# Step 1: Load propofol continuous data
 # ──────────────────────────────────────────────
-def load_fentanyl_continuous():
-    """Load continuous fentanyl during MV, standardize to mcg/hr."""
-    print("Step 1: Loading continuous fentanyl data...")
+def load_propofol_continuous():
+    """Load continuous propofol during MV."""
+    print("Step 1: Loading continuous propofol data...")
     cohort = load_intermediate("cohort")
     cohort["mv_start"] = pd.to_datetime(cohort["mv_start"])
     cohort["mv_end"] = pd.to_datetime(cohort["mv_end"])
     mv = cohort[["hospitalization_id", "mv_start", "mv_end"]].copy()
 
-    fent_c = load_clif_table(
+    prop = load_clif_table(
         "medication_admin_continuous",
-        filters=[("med_category", "==", "fentanyl")],
+        filters=[("med_category", "==", "propofol")],
     )
-    fent_c["admin_dttm"] = pd.to_datetime(fent_c["admin_dttm"])
-
-    # Exclude sufentanil/remifentanil
-    mask = ~fent_c["med_name"].str.upper().str.contains(
-        "|".join(FENTANYL_EXCLUDE_NAMES), na=False
-    )
-    fent_c = fent_c[mask]
+    prop["admin_dttm"] = pd.to_datetime(prop["admin_dttm"])
 
     # Restrict to MV windows
-    fent_c = fent_c.merge(mv, on="hospitalization_id")
-    fent_c = fent_c[
-        (fent_c["admin_dttm"] >= fent_c["mv_start"])
-        & (fent_c["admin_dttm"] <= fent_c["mv_end"])
+    prop = prop.merge(mv, on="hospitalization_id")
+    prop = prop[
+        (prop["admin_dttm"] >= prop["mv_start"])
+        & (prop["admin_dttm"] <= prop["mv_end"])
     ]
 
-    # Standardize doses to mcg/hr
-    needs_weight = fent_c["med_dose_unit"] == "mcg/kg/hr"
-    if needs_weight.any():
-        weight_ids = fent_c.loc[needs_weight, "hospitalization_id"].unique()
-        vitals = load_clif_table(
-            "vitals",
-            columns=["hospitalization_id", "vital_category", "vital_value"],
-            filters=[("vital_category", "==", "weight_kg")],
-        )
-        vitals = vitals[vitals["hospitalization_id"].isin(weight_ids)]
-        vitals["vital_value"] = pd.to_numeric(vitals["vital_value"], errors="coerce")
-        weight_by_patient = (
-            vitals.groupby("hospitalization_id")["vital_value"]
-            .median()
-            .reset_index()
-            .rename(columns={"vital_value": "weight_kg"})
-        )
-        fent_c = fent_c.merge(weight_by_patient, on="hospitalization_id", how="left")
-        needs_weight = fent_c["med_dose_unit"] == "mcg/kg/hr"
-        fent_c["weight_kg"] = fent_c["weight_kg"].fillna(80.0)
-        fent_c["dose_mcg_hr"] = np.where(
-            needs_weight,
-            fent_c["med_dose"] * fent_c["weight_kg"],
-            fent_c["med_dose"],
-        )
-    else:
-        fent_c["dose_mcg_hr"] = fent_c["med_dose"]
+    # Dose standardization (all mcg/kg/min)
+    prop["dose"] = prop["med_dose"].copy()
+    prop.loc[prop["mar_action_category"] == "stop", "dose"] = 0
+    prop = prop[prop["dose"].notna()].copy()
+    prop = prop[(prop["dose"] >= 0) & (prop["dose"] <= PROPOFOL_MAX_DOSE)].copy()
 
-    # Handle stops as dose = 0
-    fent_c.loc[fent_c["mar_action_category"] == "stop", "dose_mcg_hr"] = 0
+    print(f"  Propofol records during MV: {len(prop):,}")
+    print(f"  Patients: {prop['hospitalization_id'].nunique():,}")
 
-    # Remove missing/outlier doses
-    fent_c = fent_c[fent_c["dose_mcg_hr"].notna()].copy()
-    fent_c = fent_c[(fent_c["dose_mcg_hr"] >= 0) & (fent_c["dose_mcg_hr"] <= 500)].copy()
-
-    print(f"  Continuous fentanyl records during MV: {len(fent_c):,}")
-    print(f"  Patients: {fent_c['hospitalization_id'].nunique():,}")
-
-    return fent_c, mv
+    return prop, mv
 
 
 # ──────────────────────────────────────────────
 # Step 2: Identify dose increases
 # ──────────────────────────────────────────────
-def identify_dose_increases(fent_c):
-    """Find all instances where fentanyl rate increased from the previous record."""
+def identify_dose_increases(prop):
+    """Find all instances where propofol rate increased."""
     print("\nStep 2: Identifying dose increases...")
 
-    fent_c = fent_c.sort_values(["hospitalization_id", "admin_dttm"]).copy()
-    fent_c["prev_dose"] = fent_c.groupby("hospitalization_id")["dose_mcg_hr"].shift(1)
+    prop = prop.sort_values(["hospitalization_id", "admin_dttm"]).copy()
+    prop["prev_dose"] = prop.groupby("hospitalization_id")["dose"].shift(1)
 
-    # Dose increase = current > previous, and previous was not missing
-    increases = fent_c[
-        (fent_c["prev_dose"].notna())
-        & (fent_c["dose_mcg_hr"] > fent_c["prev_dose"])
-        & (fent_c["prev_dose"] > 0)  # Exclude restarts from 0
+    increases = prop[
+        (prop["prev_dose"].notna())
+        & (prop["dose"] > prop["prev_dose"])
+        & (prop["prev_dose"] > 0)  # Exclude restarts from 0
     ].copy()
 
-    increases["dose_change_mcg_hr"] = increases["dose_mcg_hr"] - increases["prev_dose"]
+    increases["dose_change"] = increases["dose"] - increases["prev_dose"]
 
-    n_increases = len(increases)
-    n_patients = increases["hospitalization_id"].nunique()
-    print(f"  Total dose increases: {n_increases:,}")
-    print(f"  Patients with at least one increase: {n_patients:,}")
-    print(f"  Median increase magnitude: {increases['dose_change_mcg_hr'].median():.0f} mcg/hr")
-    print(f"  IQR: [{increases['dose_change_mcg_hr'].quantile(0.25):.0f} - "
-          f"{increases['dose_change_mcg_hr'].quantile(0.75):.0f}] mcg/hr")
+    print(f"  Total dose increases: {len(increases):,}")
+    print(f"  Patients with at least one increase: {increases['hospitalization_id'].nunique():,}")
+    print(f"  Median increase: {increases['dose_change'].median():.1f} mcg/kg/min")
+    print(f"  IQR: [{increases['dose_change'].quantile(0.25):.1f} - "
+          f"{increases['dose_change'].quantile(0.75):.1f}] mcg/kg/min")
 
     return increases
 
@@ -154,7 +115,6 @@ def match_rass_to_increases(increases, mv):
     """For each dose increase, find most recent RASS within lookback window."""
     print(f"\nStep 3: Matching dose increases to RASS within {LOOKBACK_MINUTES} min lookback...")
 
-    # Load RASS during MV
     rass = load_clif_table(
         "patient_assessments",
         filters=[("assessment_category", "==", "RASS")],
@@ -173,7 +133,6 @@ def match_rass_to_increases(increases, mv):
     rass = rass.sort_values(["hospitalization_id", "recorded_dttm"])
     print(f"  RASS records during MV: {len(rass):,}")
 
-    # For each dose increase, find most recent RASS within lookback
     rass_scores = []
 
     for hid, inc_grp in increases.groupby("hospitalization_id"):
@@ -193,7 +152,7 @@ def match_rass_to_increases(increases, mv):
             if np.any(in_window):
                 window_diffs = diffs[in_window]
                 window_vals = rass_vals[in_window]
-                most_recent_idx = np.argmax(window_diffs)  # closest to 0
+                most_recent_idx = np.argmax(window_diffs)
                 rass_scores.append(window_vals[most_recent_idx])
             else:
                 rass_scores.append(np.nan)
@@ -201,7 +160,6 @@ def match_rass_to_increases(increases, mv):
     increases = increases.copy()
     increases["rass_score"] = rass_scores
 
-    # Categorize using standard RASS buckets
     def categorize(score):
         if np.isnan(score):
             return f"No RASS within {LOOKBACK_MINUTES} min"
@@ -216,7 +174,6 @@ def match_rass_to_increases(increases, mv):
 
     increases["justification"] = increases["rass_score"].apply(categorize)
 
-    # Print summary
     print(f"\n  RASS justification breakdown:")
     print(f"  {'─' * 55}")
     for cat, n in increases["justification"].value_counts().items():
@@ -259,10 +216,10 @@ def create_summary(increases):
 
     rows.append({"Category": "Total", "N Dose Increases": len(increases), "%": "100%"})
     table = pd.DataFrame(rows)
-    save_table(table, "table15_dose_increase_rass_justification")
+    save_table(table, "table18_propofol_dose_increase_rass")
     print(table.to_string(index=False))
 
-    # Figure: horizontal bar
+    # Figure
     plot_data = table[table["Category"] != "Total"].copy()
     counts = [plot_data.iloc[i]["N Dose Increases"] for i in range(len(plot_data))]
     pcts = [100 * c / len(increases) for c in counts]
@@ -279,14 +236,14 @@ def create_summary(increases):
             va="center", fontsize=11, fontweight="bold",
         )
 
-    ax.set_xlabel("% of Fentanyl Dose Increases")
+    ax.set_xlabel("% of Propofol Dose Increases")
     ax.set_title(
-        f"RASS Score at Time of Fentanyl Dose Increase\n"
+        f"RASS Score at Time of Propofol Dose Increase\n"
         f"({LOOKBACK_MINUTES}-min lookback, 'justified' = RASS > {RASS_JUSTIFIED_THRESHOLD})"
     )
     ax.set_xlim(0, max(pcts) * 1.3)
     fig.tight_layout()
-    save_figure(fig, "fig20_dose_increase_rass_justification")
+    save_figure(fig, "fig26_propofol_dose_increase_rass")
     plt.close(fig)
 
 
@@ -301,7 +258,6 @@ def stratify_by_icu_type(increases):
     cohort["mv_start"] = pd.to_datetime(cohort["mv_start"])
     cohort["mv_end"] = pd.to_datetime(cohort["mv_end"])
 
-    # Assign ICU type via ADT (same logic as scripts 06/08)
     adt = load_clif_table(
         "adt",
         columns=["hospitalization_id", "in_dttm", "out_dttm",
@@ -328,7 +284,6 @@ def stratify_by_icu_type(increases):
     )
     dominant = dominant.rename(columns={"location_type": "icu_type"})
 
-    # Merge ICU type onto increases
     inc = increases.merge(dominant, on="hospitalization_id", how="left")
     inc["icu_type"] = inc["icu_type"].fillna("unknown")
     inc = inc[inc["icu_type"] != "unknown"]
@@ -347,10 +302,10 @@ def stratify_by_icu_type(increases):
         rows.append(row)
 
     table = pd.DataFrame(rows).sort_values("N Increases", ascending=False)
-    save_table(table, "table16_dose_increase_rass_by_icu")
+    save_table(table, "table19_propofol_dose_increase_rass_by_icu")
     print(table.to_string(index=False))
 
-    # Figure: stacked horizontal bar by ICU type
+    # Stacked bar figure
     icu_types_sorted = []
     for icu_type, grp in inc.groupby("icu_type"):
         if len(grp) < 20:
@@ -375,7 +330,7 @@ def stratify_by_icu_type(increases):
                 grp = inc[inc["icu_type"] == row["icu_type"]]
                 pct = 100 * (grp["justification"] == cat).sum() / len(grp)
                 vals.append(pct)
-            bars = ax.barh(
+            ax.barh(
                 y_pos, vals, left=left, color=CAT_COLORS[cat],
                 label=cat, edgecolor="white", height=0.6,
             )
@@ -384,16 +339,15 @@ def stratify_by_icu_type(increases):
         ax.set_yticks(y_pos)
         ax.set_yticklabels(icu_df["icu_type"].tolist())
         ax.set_xlabel("% of Dose Increases")
-        ax.set_title("RASS Score at Time of Fentanyl Dose Increase by ICU Type")
+        ax.set_title("RASS Score at Time of Propofol Dose Increase by ICU Type")
         ax.legend(loc="lower right", fontsize=7)
         ax.set_xlim(0, 105)
 
-        # Add n labels
         for i, (_, row) in enumerate(icu_df.iterrows()):
             ax.text(102, i, f"n={row['n']:,}", va="center", fontsize=9, color="gray")
 
         fig.tight_layout()
-        save_figure(fig, "fig21_dose_increase_rass_by_icu")
+        save_figure(fig, "fig27_propofol_dose_increase_rass_by_icu")
         plt.close(fig)
 
 
@@ -401,7 +355,7 @@ def stratify_by_icu_type(increases):
 # Step 6: % Justified over time (by year)
 # ──────────────────────────────────────────────
 def plot_justification_by_year(increases):
-    """Plot % RASS-justified dose increases by admission year."""
+    """Plot % RASS-justified propofol dose increases by admission year."""
     print("\nStep 6: Plotting justification trend by year...")
 
     cohort = load_intermediate("cohort")
@@ -430,15 +384,13 @@ def plot_justification_by_year(increases):
 
     fig, ax1 = plt.subplots(figsize=(10, 5))
 
-    # Bar: N dose increases (background)
     ax2 = ax1.twinx()
-    ax2.bar(yr_df["Year"], yr_df["N Increases"], color="#e0e0e0", width=0.6, zorder=1, label="N increases")
+    ax2.bar(yr_df["Year"], yr_df["N Increases"], color="#e0e0e0", width=0.6, zorder=1)
     ax2.set_ylabel("N Dose Increases", color="gray")
     ax2.tick_params(axis="y", labelcolor="gray")
 
-    # Line: % justified
     ax1.plot(yr_df["Year"], yr_df["% Justified"], "o-", color="#2e7d32", linewidth=2.5,
-             markersize=8, zorder=3, label="% Agitated (RASS > 0)")
+             markersize=8, zorder=3)
     for _, row in yr_df.iterrows():
         ax1.annotate(f"{row['% Justified']:.1f}%",
                      (row["Year"], row["% Justified"]),
@@ -447,14 +399,14 @@ def plot_justification_by_year(increases):
 
     ax1.set_xlabel("Admission Year")
     ax1.set_ylabel("% of Dose Increases Justified")
-    ax1.set_title(f"RASS-Justified Fentanyl Dose Increases Over Time\n(RASS > {RASS_JUSTIFIED_THRESHOLD} within {LOOKBACK_MINUTES} min)")
+    ax1.set_title(f"RASS-Justified Propofol Dose Increases Over Time\n(RASS > {RASS_JUSTIFIED_THRESHOLD} within {LOOKBACK_MINUTES} min)")
     ax1.set_ylim(0, max(yr_df["% Justified"]) * 1.5)
     ax1.set_zorder(ax2.get_zorder() + 1)
     ax1.patch.set_visible(False)
     ax1.set_xticks(yr_df["Year"])
 
     fig.tight_layout()
-    save_figure(fig, "fig23_rass_justification_by_year")
+    save_figure(fig, "fig28_propofol_rass_justification_by_year")
     plt.close(fig)
 
 
@@ -463,21 +415,21 @@ def plot_justification_by_year(increases):
 # ──────────────────────────────────────────────
 def main():
     print("=" * 60)
-    print("09_dose_increase_rass.py")
-    print("Are fentanyl dose increases driven by RASS (sedation depth)?")
+    print("11_propofol_dose_increase_rass.py")
+    print("Are propofol dose increases driven by RASS (sedation depth)?")
     print(f"'Justified' = RASS > {RASS_JUSTIFIED_THRESHOLD} (agitated)")
     print(f"Lookback window: {LOOKBACK_MINUTES} minutes")
     print("=" * 60)
 
-    fent_c, mv = load_fentanyl_continuous()
-    increases = identify_dose_increases(fent_c)
+    prop, mv = load_propofol_continuous()
+    increases = identify_dose_increases(prop)
     increases = match_rass_to_increases(increases, mv)
     create_summary(increases)
     stratify_by_icu_type(increases)
     plot_justification_by_year(increases)
 
     print("\n" + "=" * 60)
-    print("DONE. RASS-based dose increase justification analysis complete.")
+    print("DONE. Propofol RASS-based dose increase justification complete.")
     print("=" * 60)
 
 
