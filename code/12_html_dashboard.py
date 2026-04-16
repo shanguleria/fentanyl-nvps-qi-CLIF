@@ -1,7 +1,9 @@
 """
 12_html_dashboard.py
 Creates a self-contained HTML dashboard with all figures and tables
-organized into tabbed sections by analysis aim.
+organized into grouped tabbed sections by analysis aim.
+
+Styled per ~/.claude/templates/dashboard_design_guide.md (2026-04-15).
 
 Input:  output/figures/*.png, output/tables/*.csv
 Output: output/figure_dashboard.html
@@ -23,70 +25,58 @@ TABLES = Path(config["output_path"]) / "tables"
 OUTPUT = Path(config["output_path"]) / "figure_dashboard.html"
 
 # ── Tab definitions ─────────────────────────────────────────────────────────
-# Each tab: (id, label, figure_files, table_files)
-# Figure/table files are basenames without extension
+# Each tab: (id, label, group, figure_files, table_files)
+# Tabs with the same group key render under a shared uppercase group label.
 TABS = [
     (
-        "cohort",
-        "Cohort",
+        "cohort", "Cohort", "COHORT",
         ["fig0_consort_diagram"],
         ["table1_cohort"],
     ),
     (
-        "aim1",
-        "Aim 1: Fentanyl Dosing",
+        "aim1", "Fentanyl Dosing", "DOSING PATTERNS",
         ["fig1_fentanyl_trajectory", "fig2_fentanyl_dose_distribution",
          "fig3_fentanyl_bolus_pattern"],
         ["table2_fentanyl_summary"],
     ),
     (
-        "aim2",
-        "Aim 2: NVPS Patterns",
+        "propofol_dosing", "Propofol Dosing", "DOSING PATTERNS",
+        ["fig24_propofol_trajectory", "fig25_propofol_dose_distribution"],
+        ["table17_propofol_summary"],
+    ),
+    (
+        "aim2", "NVPS Patterns", "SCORING PATTERNS",
         ["fig4_nvps_gap_distribution", "fig5_nvps_by_mv_day",
          "fig6_nvps_by_time_of_day", "fig7_nvps_score_distribution"],
         ["table3_nvps_documentation"],
     ),
     (
-        "aim3",
-        "Aim 3: Association",
-        ["fig8_cumulative_incidence", "fig9_forest_plot",
-         "fig10_vfd_by_compliance"],
-        ["table4_primary_regression", "table5_cause_specific_extubation",
-         "table5_cox_model", "table5b_cause_specific_death",
-         "table5c_fine_gray", "table6_sensitivity"],
-    ),
-    (
-        "qi",
-        "QI Analyses",
-        ["fig11_nvps_action_comparison", "fig12_bolus_nvps_timing",
-         "fig13_nvps_by_rass"],
-        ["table7_nvps_action", "table8_bolus_assessment",
-         "table9_nvps_rass_concordance"],
-    ),
-    (
-        "unit",
-        "Unit-Level NVPS",
+        "unit", "Unit-Level NVPS", "SCORING PATTERNS",
         ["fig14_nonzero_rate_by_icu_type", "fig15_compliance_by_icu_type",
          "fig16_nvps_rass_by_icu_type"],
         ["table10_nvps_by_icu_type", "table11_compliance_by_icu_type",
          "table12_nvps_rass_by_icu_type"],
     ),
     (
-        "year",
-        "NVPS by Year",
+        "year", "NVPS by Year", "SCORING PATTERNS",
         ["fig17_nvps_scores_by_year"],
         ["table_nvps_scores_by_year"],
     ),
     (
-        "fent_just",
-        "Fent Dose Justification",
+        "qi", "NVPS Assessments", "QI",
+        ["fig11_nvps_action_comparison", "fig12_bolus_nvps_timing",
+         "fig13_nvps_by_rass"],
+        ["table7_nvps_action", "table8_bolus_assessment",
+         "table9_nvps_rass_concordance"],
+    ),
+    (
+        "fent_just", "Fentanyl (NVPS)", "QI",
         ["fig18_dose_increase_justification", "fig19_dose_increase_by_icu",
          "fig22_nvps_justification_by_year"],
         ["table13_dose_increase_justification", "table14_dose_increase_by_icu"],
     ),
     (
-        "rass_just",
-        "RASS Dose Justification",
+        "rass_just", "Fentanyl (RASS)", "QI",
         ["fig20_dose_increase_rass_justification",
          "fig21_dose_increase_rass_by_icu",
          "fig23_rass_justification_by_year"],
@@ -94,14 +84,20 @@ TABS = [
          "table16_dose_increase_rass_by_icu"],
     ),
     (
-        "propofol",
-        "Propofol",
-        ["fig24_propofol_trajectory", "fig25_propofol_dose_distribution",
-         "fig26_propofol_dose_increase_rass",
+        "propofol_just", "Propofol (RASS)", "QI",
+        ["fig26_propofol_dose_increase_rass",
          "fig27_propofol_dose_increase_rass_by_icu",
          "fig28_propofol_rass_justification_by_year"],
-        ["table17_propofol_summary", "table18_propofol_dose_increase_rass",
+        ["table18_propofol_dose_increase_rass",
          "table19_propofol_dose_increase_rass_by_icu"],
+    ),
+    (
+        "aim3", "NVPS Compliance \u2192 VFD-28", "ASSOCIATION",
+        ["fig8_cumulative_incidence", "fig9_forest_plot",
+         "fig10_vfd_by_compliance"],
+        ["table4_primary_regression", "table5_cause_specific_extubation",
+         "table5_cox_model", "table5b_cause_specific_death",
+         "table5c_fine_gray", "table6_sensitivity"],
     ),
 ]
 
@@ -117,11 +113,9 @@ def _clean_table1(path: Path) -> str:
     """Format tableone output: drop Missing, clean variable names,
     collapse binary True/False rows to show only the True row."""
     df = pd.read_csv(path)
-    # Drop the Missing column
     if "Missing" in df.columns:
         df = df.drop(columns=["Missing"])
 
-    # Pretty-print the variable/stat column (level_0)
     label_map = {
         "age_at_admission": "Age at Admission",
         "mv_duration_hours": "MV Duration (hours)",
@@ -151,8 +145,6 @@ def _clean_table1(path: Path) -> str:
     df = df.rename(columns={"level_0": "Variable", "level_1": "Category"})
     df["Category"] = df["Category"].fillna("")
 
-    # For binary True/False variables, keep only the True row and
-    # move the value up to the Variable row (drop Category column value)
     binary_vars = [
         "In-Hospital Death",
         "Death Within 28 Days",
@@ -166,7 +158,6 @@ def _clean_table1(path: Path) -> str:
         rows = df[mask]
         false_rows = rows[rows["Category"] == "False"]
         drop_idx.extend(false_rows.index.tolist())
-        # Clear the "True" category text — the variable name is sufficient
         true_rows = rows[rows["Category"] == "True"]
         df.loc[true_rows.index, "Category"] = ""
 
@@ -215,7 +206,6 @@ def pretty_name(basename: str) -> str:
 def build_tab_content(fig_names: list[str], table_names: list[str]) -> str:
     sections = []
 
-    # Figures
     for name in fig_names:
         path = FIGURES / f"{name}.png"
         if path.exists():
@@ -231,7 +221,6 @@ def build_tab_content(fig_names: list[str], table_names: list[str]) -> str:
                 f'<div class="missing">Missing: {name}.png</div>'
             )
 
-    # Tables
     for name in table_names:
         path = TABLES / f"{name}.csv"
         if path.exists():
@@ -250,24 +239,45 @@ def build_tab_content(fig_names: list[str], table_names: list[str]) -> str:
     return "\n".join(sections)
 
 
+def build_tab_bar() -> str:
+    """Render grouped tab bar: one column per group, preserving TABS order."""
+    groups: list[tuple[str, list]] = []
+    for tab in TABS:
+        group_label = tab[2]
+        if groups and groups[-1][0] == group_label:
+            groups[-1][1].append(tab)
+        else:
+            groups.append((group_label, [tab]))
+
+    first_tab_id = TABS[0][0]
+    group_html = []
+    for group_label, group_tabs in groups:
+        btn_html = []
+        for tid, label, _group, _f, _t in group_tabs:
+            active = " active" if tid == first_tab_id else ""
+            btn_html.append(
+                f'<button class="tab-btn{active}" '
+                f'onclick="switchTab(\'{tid}\')" '
+                f'id="btn-{tid}">{label}</button>'
+            )
+        group_html.append(
+            '<div class="tab-group">'
+            f'<div class="tab-group-label">{group_label}</div>'
+            f'<div class="tab-group-buttons">{"".join(btn_html)}</div>'
+            '</div>'
+        )
+    return "\n".join(group_html)
+
+
 # ── Assemble full HTML ──────────────────────────────────────────────────────
 def build_dashboard() -> str:
-    # Tab buttons
-    tab_buttons = []
-    for i, (tid, label, _, _) in enumerate(TABS):
-        active = " active" if i == 0 else ""
-        tab_buttons.append(
-            f'<button class="tab-btn{active}" '
-            f'onclick="switchTab(\'{tid}\')" '
-            f'id="btn-{tid}">{label}</button>'
-        )
-    tabs_bar = "\n".join(tab_buttons)
+    tabs_bar = build_tab_bar()
 
-    # Tab panels
     tab_ids_js = ", ".join(f'"{t[0]}"' for t in TABS)
     panels = []
-    for i, (tid, label, figs, tbls) in enumerate(TABS):
-        display = "block" if i == 0 else "none"
+    first_tab_id = TABS[0][0]
+    for tid, label, _group, figs, tbls in TABS:
+        display = "block" if tid == first_tab_id else "none"
         content = build_tab_content(figs, tbls)
         panels.append(
             f'<div class="tab-panel" id="panel-{tid}" '
@@ -285,126 +295,192 @@ def build_dashboard() -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Fentanyl / NVPS CLIF Analysis Dashboard</title>
 <style>
+  :root {{
+    --text-primary: #1e293b;
+    --text-heading: #0f172a;
+    --text-secondary: #64748b;
+    --text-muted: #94a3b8;
+    --accent: #0f766e;
+    --accent-light: #f0fdfa;
+    --accent-border: #ccfbf1;
+    --header-bg: #f8fafc;
+    --header-rule: #334155;
+    --row-border: #f1f5f9;
+    --row-alt: #fafbfc;
+    --row-hover: #f1f5f9;
+    --divider: #e2e8f0;
+    --missing-bg: #fffbeb;
+    --missing-border: #fde68a;
+    --missing-text: #92400e;
+    --page-bg: #f8f9fa;
+  }}
+  * {{ box-sizing: border-box; }}
   body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                 Helvetica, Arial, sans-serif;
-    background: #f0f2f5;
+    font-family: Inter, -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--text-primary);
+    background: var(--page-bg);
     margin: 0;
-    padding: 20px;
+    padding: 40px 20px;
   }}
   .container {{
-    max-width: 1400px;
+    max-width: 1600px;
     margin: 0 auto;
     background: #fff;
     border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    padding: 24px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06),
+                0 1px 2px rgba(15, 23, 42, 0.04);
+    padding: 40px 48px;
   }}
   h1 {{
-    margin: 0 0 4px 0;
-    font-size: 1.6em;
-    color: #1a1a1a;
+    margin: 0 0 6px 0;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    color: var(--text-heading);
   }}
   .subtitle {{
-    color: #666;
-    margin: 0 0 20px 0;
-    font-size: 0.95em;
+    color: var(--text-secondary);
+    margin: 0 0 32px 0;
+    font-size: 14px;
   }}
   .tab-bar {{
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    border-bottom: 2px solid #e0e0e0;
-    padding-bottom: 0;
-    margin-bottom: 24px;
+    gap: 24px;
+    padding-bottom: 20px;
+    margin-bottom: 32px;
+    border-bottom: 1px solid var(--divider);
+  }}
+  .tab-group {{
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }}
+  .tab-group-label {{
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }}
+  .tab-group-buttons {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }}
   .tab-btn {{
     padding: 8px 16px;
-    border: none;
-    background: #f0f2f5;
-    color: #333;
-    font-size: 0.85em;
+    border: 1px solid var(--divider);
+    background: #fff;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    border-radius: 6px 6px 0 0;
-    transition: background 0.15s, color 0.15s;
+    border-radius: 6px;
+    transition: background 0.12s, color 0.12s, border-color 0.12s,
+                box-shadow 0.12s;
   }}
   .tab-btn:hover {{
-    background: #d0d5dd;
+    background: var(--row-hover);
+    border-color: var(--text-muted);
   }}
   .tab-btn.active {{
-    background: #2563eb;
+    background: var(--accent);
     color: #fff;
-  }}
-  .tab-panel {{
-    padding: 0;
+    border-color: var(--accent);
+    box-shadow: 0 1px 2px rgba(15, 118, 110, 0.3);
   }}
   .tab-panel h2 {{
-    font-size: 1.3em;
-    color: #1a1a1a;
-    border-bottom: 1px solid #e0e0e0;
-    padding-bottom: 8px;
-    margin-top: 0;
+    font-size: 19px;
+    font-weight: 600;
+    color: var(--text-heading);
+    padding-bottom: 10px;
+    margin: 0 0 28px 0;
+    border-bottom: 1px solid var(--divider);
   }}
   .figure-block {{
-    margin-bottom: 32px;
+    margin-bottom: 36px;
   }}
-  .figure-block h3 {{
-    font-size: 1em;
-    color: #444;
-    margin-bottom: 8px;
+  .figure-block h3,
+  .section h3 {{
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-heading);
+    margin: 0 0 12px 0;
+    text-align: left;
   }}
   .figure-block img {{
+    display: block;
     max-width: 100%;
     height: auto;
-    border: 1px solid #e0e0e0;
-    border-radius: 4px;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08),
+                0 1px 2px rgba(15, 23, 42, 0.04);
   }}
   .section {{
-    margin-bottom: 32px;
-  }}
-  .section h3 {{
-    font-size: 1em;
-    color: #444;
-    margin-bottom: 8px;
+    padding: 28px;
+    margin-bottom: 48px;
+    background: #fff;
+    border: 1px solid var(--row-border);
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
   }}
   .missing {{
-    color: #999;
-    font-style: italic;
-    padding: 12px;
-    background: #fafafa;
-    border-radius: 4px;
+    background: var(--missing-bg);
+    border: 1px solid var(--missing-border);
+    color: var(--missing-text);
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-size: 13px;
     margin-bottom: 16px;
+  }}
+  .missing::before {{
+    content: "— ";
+    font-weight: 600;
   }}
   table.results-table {{
     border-collapse: collapse;
-    width: 100%;
-    font-size: 0.85em;
-    margin-bottom: 8px;
+    width: auto;
+    font-size: 13px;
+    color: var(--text-primary);
   }}
   table.results-table thead th {{
-    background: #2563eb;
-    color: #fff;
-    padding: 8px 12px;
+    background: var(--header-bg);
+    color: var(--text-heading);
+    padding: 9px 12px;
     text-align: left;
     font-weight: 600;
+    border-bottom: 2px solid var(--header-rule);
+    border-top: none;
+    border-left: none;
+    border-right: none;
   }}
   table.results-table tbody td {{
-    padding: 6px 12px;
-    border-bottom: 1px solid #e8e8e8;
+    padding: 9px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--row-border);
+    border-left: none;
+    border-right: none;
+    border-top: none;
   }}
-  table.results-table tbody tr:nth-child(even) {{
-    background: #f9f9f9;
+  table.results-table tbody tr:nth-child(even) td {{
+    background: var(--row-alt);
   }}
-  table.results-table tbody tr:hover {{
-    background: #eef2ff;
+  table.results-table tbody tr:hover td {{
+    background: var(--row-hover);
+  }}
+  table.results-table tbody tr:last-child td {{
+    border-bottom: 1px solid var(--text-muted);
   }}
 </style>
 </head>
 <body>
 <div class="container">
   <h1>Fentanyl / NVPS CLIF Analysis Dashboard</h1>
-  <p class="subtitle">29 figures &middot; 24 tables &middot; UCMC 2018-2024 &middot; N = 12,620</p>
+  <p class="subtitle">29 figures &middot; 24 tables &middot; UCMC 2018&ndash;2024 &middot; N = 12,620</p>
   <div class="tab-bar">
     {tabs_bar}
   </div>
